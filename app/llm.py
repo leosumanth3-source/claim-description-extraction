@@ -1,148 +1,85 @@
+"""Gemini client — sends claim text, parses structured response, retries on failure."""
+
 import json
 
 from google import genai
 from google.genai import types
+from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
-from .prompts import build_system_prompt
-from .schemas import (
-    ClaimExtraction,
-    DynamicLLMResponse,
-)
+from app.schemas.claim_fields import DynamicLLMResponse
+from app.core.logging import get_logger
+from app.prompts import build_system_prompt
+
+logger = get_logger(__name__)
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(t in msg for t in ("429", "rate", "quota", "503", "502", "timeout", "connection"))
 
 
 class LLMExtractor:
-    """
-    Sends claim descriptions to Gemini.
-
-    All standard mandatory claim fields are extracted.
-
-    Custom fields are supplied dynamically for the session.
-    """
-
-    def __init__(
-        self,
-        api_key: str,
-        model: str,
-    ) -> None:
-
-        # Store the selected Gemini model.
+    def __init__(self, api_key: str, model: str, max_retries: int = 3) -> None:
         self.model = model
+        self.max_retries = max_retries
+        self.api_key = api_key
+        self.client = genai.Client(api_key=api_key) if api_key else None
 
-        # Create Gemini API client.
-        self.client = genai.Client(
-            api_key=api_key
-        )
-
-    async def extract(
-        self,
-        description: str,
-        custom_fields: list[str],
-    ) -> dict:
-        """
-        Extract mandatory + custom fields.
-        """
-
+    async def extract(self, description: str, custom_fields: list[str]) -> dict:
         if not description.strip():
-            raise ValueError(
-                "Claim description cannot be empty."
-            )
+            raise ValueError("Claim description cannot be empty.")
+        if self.client is None:
+            raise RuntimeError("GEMINI_API_KEY is not configured.")
 
-        # Create a dynamic prompt from the
-        # custom keys registered by Streamlit.
-        system_prompt = build_system_prompt(
-            custom_fields
+        system_prompt = build_system_prompt(custom_fields)
+
+        retrying = AsyncRetrying(
+            stop=stop_after_attempt(self.max_retries),
+            wait=wait_exponential(min=1, max=10),
+            retry=retry_if_exception(_is_retryable),
+            reraise=True,
         )
 
-        # Ask Gemini for our fixed internal schema.
-        response = await self.client.aio.models.generate_content(
-            model=self.model,
-            contents=description,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                response_mime_type="application/json",
-                response_schema=DynamicLLMResponse,
-            ),
-        )
+        async for attempt in retrying:
+            with attempt:
+                response = await self.client.aio.models.generate_content(
+                    model=self.model,
+                    contents=description,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        response_mime_type="application/json",
+                        response_schema=DynamicLLMResponse,
+                    ),
+                )
 
-        # Gemini SDK may already parse the response.
         if response.parsed is not None:
-
-            if isinstance(
-                response.parsed,
-                DynamicLLMResponse,
-            ):
-                parsed = response.parsed
-
-            else:
-                parsed = DynamicLLMResponse.model_validate(
-                    response.parsed
-                )
-
-        # Fallback if Gemini gives us JSON text.
-        elif response.text:
             parsed = (
-                DynamicLLMResponse
-                .model_validate_json(
-                    response.text
-                )
+                response.parsed
+                if isinstance(response.parsed, DynamicLLMResponse)
+                else DynamicLLMResponse.model_validate(response.parsed)
             )
-
+        elif response.text:
+            parsed = DynamicLLMResponse.model_validate_json(response.text)
         else:
-            raise RuntimeError(
-                "Gemini returned an empty response."
-            )
+            raise RuntimeError("Gemini returned an empty response.")
 
-        # Start with all standard mandatory fields.
-        result = parsed.mandatory.model_dump(
-            by_alias=True
-        )
+        result = parsed.mandatory.model_dump(by_alias=True)
 
-        # Convert custom Gemini results into a dictionary.
-        custom_values = {
-            item.key: item.value
-            for item in parsed.custom_fields
-        }
-
-        # Add EVERY custom field requested by the user.
-        #
-        # If Gemini could not find the value,
-        # return null.
+        custom_values = {item.key: item.value for item in parsed.custom_fields}
         for key in custom_fields:
-            result[key] = self._convert_value(
-                custom_values.get(key)
-            )
+            result[key] = _coerce(custom_values.get(key))
 
         return result
 
-    @staticmethod
-    def _convert_value(
-        value: str | None,
-    ):
-        """
-        Convert simple JSON-looking string values
-        into their appropriate Python values.
 
-        Examples:
-        "1971" -> 1971
-        "1.5" -> 1.5
-        "[...]" -> list
-        "{...}" -> dict
-        "ABC123" -> "ABC123"
-        """
-
-        if value is None:
-            return None
-
-        value = value.strip()
-
-        if not value:
-            return None
-
-        # Try to interpret numbers, arrays and objects.
-        try:
-            return json.loads(value)
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-        # Otherwise keep it as a string.
+def _coerce(value: str | None):
+    """Try to parse string values that look like JSON numbers/lists/objects."""
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
         return value

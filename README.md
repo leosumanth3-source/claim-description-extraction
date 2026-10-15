@@ -1,108 +1,73 @@
-# Claim Field Extractor — Using Gemini
+# Claim Field Extractor
 
-A self-contained Streamlit application that extracts a fixed set of claim fields from unstructured claim text using Gemini.
+A small FastAPI service that extracts structured insurance-claim fields with Google Gemini.
 
-## Project structure
+## Routes
+
+Only two routes are exposed:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Service health check |
+| `POST` | `/api/v1/claims/extract` | Extract fields from one claim narrative |
+
+There are no batch, cache, metrics, examples, field-listing, readiness, liveness, or metadata endpoints.
+
+## Project layout
 
 ```text
 app/
-├── config.py                       # Environment-based configuration
-├── llm.py                          # Gemini client and structured-response parsing
-├── prompts.py                      # Prompt construction
-├── schemas.py                      # Pydantic response models and standard fields
-├── services/
-│   └── claim_extraction.py          # Framework-independent extraction service
-└── streamlit_app.py                 # Streamlit user interface
+├── api/                 # HTTP handlers: health and extract only
+├── core/                # Logging and error handling
+├── schemas/             # Request, response, and Gemini structured-output models
+├── services/            # Extraction business logic
+├── config.py            # Environment settings
+├── llm.py               # Gemini client
+├── prompts.py           # Extraction instructions
+└── main.py              # FastAPI application factory
 ```
 
-## Model
-
-Default model: `gemini-3.1-flash-lite`
-
-The model is controlled by `GEMINI_MODEL`, so it can be changed without changing application code.
-
-## Required output
-
-The service always returns exactly these fields:
-
-- Year Built
-- House Size (Square Footage)
-- Number of Stories
-- Roof Type
-- Structure Type
-- Interior Damage (Yes/No)
-- Roof Damage (Yes/No)
-- Type of Roof Damage
-- Missing Shingles
-- Hail Damage
-- Wind Damage
-- Rain Leakage (Yes/No)
-- Water Damage (Yes/No)
-- Rooms Affected by Water
-- Affected Room Names (Kitchen, Living Room, Basement)
-- Wall Damage
-- Sheetrock Damage
-- Flooring Damage
-- Ceiling/Closet Area Damage
-- Humidity Damage
-- Sewer Backup / Sewer Water
-- Lightning Damage
-- Electrical / Electronics Damage
-- Lights Damage
-- HVAC / AC Damage
-- Endorsements
-- Deductible Type
-- Deductible Amount
-- Prior Losses
-- Prior Loss Date
-- Prior Loss Type
-- Coverage Limits
-- Dwelling Coverage Limit
-- Other Structures Coverage Limit
-- Personal Property Coverage Limit
-- Additional Living Expenses Limit
-- Roof Coverage Limitations
-- Construction Type
-- Occupancy Type
-- Cause of Loss
-- Loss Description
-- ACV Policy (Yes/No)
-- Other Structures Coverage Exclusion
-- Non-Structural Exclusion
-
-Missing evidence is returned as `null`.
-
-## Why Gemini Flash-Lite
-
-- Low-latency response performance
-- High-throughput execution
-- Cost-efficient processing
-- Structured output support
-- Large context capacity for long claim descriptions
-- Stronger performance than previous Flash-Lite generations
-
-## Design notes
-
-- Gemini remains the separate inference provider.
-- Pydantic validates the structured Gemini response.
-- The model and API key are configured through environment variables.
-- The Streamlit interface extracts the standard claim schema and optional session-only custom fields without a separate backend process.
-
-For production traffic above the Gemini free-tier limits, move the same code to a paid Gemini tier rather than rewriting the extraction logic.
-
-## Run the standalone Streamlit app
+## Setup and run
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# Put your Gemini API key into .env
-streamlit run app/streamlit_app.py
+# Set GEMINI_API_KEY in .env
+uvicorn app.main:app --reload
 ```
 
-Only the `streamlit run` command is required. The Streamlit app keeps custom fields in the active browser session and sends extraction requests directly to Gemini.
+## Extract one claim
 
-## Important data-policy note
+```bash
+curl -X POST http://localhost:8000/api/v1/claims/extract \
+  -H 'Content-Type: text/plain' \
+  --data-binary $'claim_description: The 1985 home has roof damage from hail.\ncustom_field: Adjuster Name'
+```
 
-Google's current Gemini API pricing page says the Free tier may use submitted content to improve Google products. For real insurance/PII production workloads, review the applicable data-processing terms and use a paid/enterprise configuration when required.
+The response contains the extracted standard fields. Missing evidence is returned as `null`.
+
+Each successful response contains a generated UUID `request_id` and a `performance` object:
+
+```json
+{
+  "success": true,
+  "request_id": "10ba8588-593e-4470-adeb-1288417de09f",
+  "data": {"Year Built": 1985},
+  "performance": {
+    "model": "gemini-3.1-flash-lite",
+    "latency_seconds": 1.24,
+    "populated_fields": 1,
+    "total_fields": 44
+  }
+}
+```
+
+Send plain text, not a JSON object. `claim_description:` is required; `custom_field:` is an optional single text value for one extra field to extract. The claim description can span multiple lines.
+
+## Test
+
+```bash
+pytest -q
+```

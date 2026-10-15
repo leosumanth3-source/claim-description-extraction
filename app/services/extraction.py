@@ -1,12 +1,10 @@
-"""Framework-independent claim extraction use case."""
+"""Extraction service — wraps LLMExtractor with clean interface."""
 
 from app.config import Settings
 from app.llm import LLMExtractor
 
 
-class ClaimExtractionService:
-    """Coordinates Gemini extraction for the Streamlit application."""
-
+class ExtractionService:
     def __init__(self, settings: Settings) -> None:
         self.model = settings.gemini_model
         self._extractor = LLMExtractor(
@@ -14,13 +12,9 @@ class ClaimExtractionService:
             model=settings.gemini_model,
         )
 
-    async def extract(
-        self,
-        description: str,
-        custom_fields: list[str],
-    ) -> dict:
-        """Extract all standard and requested custom claim fields."""
-
+    async def extract(self, description: str, custom_fields: list[str]) -> dict:
+        if not self._extractor.api_key:
+            raise RuntimeError("GEMINI_API_KEY is not configured.")
         return await self._extractor.extract(
             description=description,
             custom_fields=custom_fields,

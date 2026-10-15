@@ -1,5 +1,3 @@
-"""Application services independent of the web framework."""
+from app.services.extraction import ExtractionService
 
-from .claim_extraction import ClaimExtractionService
-
-__all__ = ["ClaimExtractionService"]
+__all__ = ["ExtractionService"]

@@ -1,5 +1,8 @@
-# Local runtime configuration and virtual environment.
+# Local runtime configuration and virtual environment
 .env
 .venv/
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
